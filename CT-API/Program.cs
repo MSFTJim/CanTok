@@ -24,6 +24,18 @@ app.MapGet("/", (ILogger<Program> logger) =>
     return Results.Ok(response);
 });
 
+// BAD EXAMPLE: Ignores client cancellation
+app.MapGet("/orders/slow", async (string? q, IOrderRepo repo, ILogger<Program> logger) =>
+{
+    logger.LogInformation("HTTP GET /orders/slow received for query: '{Query}'", q);
+    
+    var results = await repo.SearchWithoutCancellationAsync(q ?? string.Empty);
+    
+    logger.LogInformation("[SLOW] Search finished processing for query: '{Query}'", q);
+    return Results.Ok(results);
+});
+
+// GOOD EXAMPLE: Respects client cancellation
 app.MapGet("/orders", async (string? q, IOrderRepo repo, ILogger<Program> logger, CancellationToken ct) =>
 {
     logger.LogInformation("HTTP GET /orders received for query: '{Query}'", q);
@@ -36,17 +48,19 @@ app.MapGet("/orders", async (string? q, IOrderRepo repo, ILogger<Program> logger
     }
     catch (OperationCanceledException)
     {
-        // Caught at the endpoint level to highlight that the pipeline was aborted
         logger.LogWarning("Request for query '{Query}' was canceled by the client.", q);
-        throw; // Re-throw so Kestrel handles the socket cleanup
+        throw;
     }
 });
 
 app.Run();
 
+public record OrderDto(int OrderId, string CustomerName, decimal Total, string Status);
+
 public interface IOrderRepo
 {
-    Task<IEnumerable<string>> SearchAsync(string query, CancellationToken ct);
+    Task<IEnumerable<OrderDto>> SearchAsync(string query, CancellationToken ct);
+    Task<IEnumerable<OrderDto>> SearchWithoutCancellationAsync(string query);
 }
 
 public class FakeOrderRepo : IOrderRepo
@@ -58,24 +72,43 @@ public class FakeOrderRepo : IOrderRepo
         _logger = logger;
     }
 
-    public async Task<IEnumerable<string>> SearchAsync(string query, CancellationToken ct)
+    // Ignores cancellation - keeps running even if client disconnects
+    public async Task<IEnumerable<OrderDto>> SearchWithoutCancellationAsync(string query)
     {
-        _logger.LogInformation("Starting long-running order search...");
+        _logger.LogInformation("[SLOW REPO] Starting uncancelled long-running search...");
 
         for (var i = 1; i <= 5; i++)
         {
-            // Optional explicit check if you want to log before attempting the delay
-            if (ct.IsCancellationRequested)
-            {
-                _logger.LogWarning("Cancellation detected before starting step {Step}/5.", i);
-            }
-
-            _logger.LogInformation("Executing search step {Step}/5...", i);
-
-            // Task.Delay will throw OperationCanceledException instantly if ct is canceled during the wait
-            await Task.Delay(1000, ct);
+            _logger.LogInformation("[SLOW REPO] Executing step {Step}/5 (Wasting server time)...", i);
+            await Task.Delay(1000); // No cancellation token passed
         }
 
-        return new[] { $"Result for {query}" };
+        return GenerateMockOrders(query);
+    }
+
+    // Respects cancellation - aborts immediately on client disconnect
+    public async Task<IEnumerable<OrderDto>> SearchAsync(string query, CancellationToken ct)
+    {
+        _logger.LogInformation("[CANCELABLE REPO] Starting long-running order search...");
+
+        for (var i = 1; i <= 5; i++)
+        {
+            _logger.LogInformation("[CANCELABLE REPO] Executing step {Step}/5...", i);
+            await Task.Delay(1000, ct); // Token passed here
+        }
+
+        return GenerateMockOrders(query);
+    }
+
+    private static List<OrderDto> GenerateMockOrders(string query)
+    {
+        var searchTerm = string.IsNullOrWhiteSpace(query) ? "Standard Order" : query;
+
+        return new List<OrderDto>
+        {
+            new(1001, $"Acme Corp ({searchTerm})", 1250.00m, "Shipped"),
+            new(1002, $"Contoso Ltd ({searchTerm})", 450.50m, "Processing"),
+            new(1003, $"Fabrikam Inc ({searchTerm})", 89.99m, "Delivered")
+        };
     }
 }
