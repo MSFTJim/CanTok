@@ -1,0 +1,12 @@
+dotnet new webapi -n CT-API
+
+dotnet new sln -n CTSln 
+dotnet sln CTSln.sln add CT-API/CT-API.csproj
+cd CT-API
+
+# dotnet add package Microsoft.OpenApi --version 2.7.5
+
+curl http://localhost:5265
+
+# dotnet add package Azure.Identity
+# dotnet add package Microsoft.Data.SqlClient
